@@ -1,10 +1,12 @@
+
 import os
 import asyncio
-from typing import Dict
 from dotenv import load_dotenv
 import ee  # Google Earth Engine
-import requests
 from pydantic import BaseModel
+from typing import List
+
+ee.Initialize(project='crop-monitoring-project-469812')
 
 from tavily import TavilyClient
 from agents import (
@@ -14,6 +16,7 @@ from agents import (
     OpenAIChatCompletionsModel,
     set_tracing_export_api_key,
     ModelSettings,
+    ItemHelpers,
     function_tool,
     RunContextWrapper,
     StopAtTools,
@@ -23,9 +26,6 @@ from agents import (
 from agents.extensions.handoff_filters import remove_all_tools
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 
-# =============================
-# Context: env, clients, model
-# =============================
 class Context:
     def __init__(self):
         load_dotenv()
@@ -35,7 +35,6 @@ class Context:
 
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")
-        self.weather_api_key = os.getenv("OPENWEATHER_API_KEY")
 
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
@@ -50,9 +49,6 @@ class Context:
 ctx = Context()
 ee.Initialize()  # Initialize Earth Engine
 
-# =============================
-# Tools
-# =============================
 @function_tool
 async def agri_search(query: str) -> str:
     try:
@@ -68,10 +64,14 @@ async def agri_search(query: str) -> str:
         output += f"{idx}. {r.get('title','No title')} — {r.get('url','')}\n"
     return output
 
+
+class RegionInput(BaseModel):
+    coordinates: List[List[List[float]]]
+
 @function_tool
-async def crop_monitoring(region: dict, start_date: str, end_date: str, index: str = "NDVI") -> str:
+async def crop_monitoring(region: RegionInput, start_date: str, end_date: str, index: str = "NDVI") -> str:
     try:
-        polygon = ee.Geometry.Polygon(region["coordinates"])
+        polygon = ee.Geometry.Polygon(region.coordinates)
         collection = (ee.ImageCollection("COPERNICUS/S2")
                       .filterBounds(polygon)
                       .filterDate(start_date, end_date)
@@ -86,35 +86,6 @@ async def crop_monitoring(region: dict, start_date: str, end_date: str, index: s
     except Exception as e:
         return f"Crop monitoring failed: {e}"
 
-@function_tool
-async def weather_update(city: str) -> str:
-    """Get real-time weather data for agronomy decisions using OpenWeatherMap API."""
-    try:
-        api_key = ctx.weather_api_key
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
-        response = requests.get(url)
-        data = response.json()
-        if data.get("cod") != 200:
-            return f"Weather API error: {data.get('message')}"
-        weather_desc = data["weather"][0]["description"]
-        temp = data["main"]["temp"]
-        humidity = data["main"]["humidity"]
-        wind_speed = data["wind"]["speed"]
-        return (f"🌤 Weather in {city}: {weather_desc}, Temperature: {temp}°C, "
-                f"Humidity: {humidity}%, Wind Speed: {wind_speed} m/s")
-    except Exception as e:
-        return f"Weather update failed: {e}"
-
-def is_user_admin(context: RunContextWrapper, agent: Agent) -> bool:
-    return context.get("user_role") == "admin"
-
-@function_tool(is_enabled=is_user_admin)
-def delete_field_data() -> str:
-    return "✅ Admin tool executed: Field data deleted."
-
-# =============================
-# Stateful Tool
-# =============================
 class AnalysisCounter(FunctionTool):
     def __init__(self):
         self._count = 0
@@ -131,9 +102,6 @@ class AnalysisCounter(FunctionTool):
 
 counter_tool = AnalysisCounter()
 
-# =============================
-# Stateful Instructions
-# =============================
 class AgriStatefulAgent:
     def __init__(self):
         self.interaction_count = 0
@@ -146,7 +114,6 @@ class AgriStatefulAgent:
             "- Break down complex tasks.\n"
             "- Use `agri_search` for research.\n"
             "- Use `crop_monitoring` for NDVI or vegetation analysis.\n"
-            "- Use `weather_update` for weather-related guidance.\n"
             "- Cite sources briefly.\n"
         )
         if self.previous_queries:
@@ -163,50 +130,35 @@ class AgriStatefulAgent:
 
 stateful_agri = AgriStatefulAgent()
 
-# =============================
-# Base Agent with Advanced Features
-# =============================
-base_agent = Agent(
-    name="AgroDeepSearchAgent",
-    instructions=lambda context, agent: stateful_agri.get_instructions(context, agent),
-    tools=[agri_search, crop_monitoring, weather_update, delete_field_data, counter_tool],
-    model=ctx.model,
-    model_settings=ModelSettings(temperature=0.4),
-    tool_use_behavior=StopAtTools(stop_at_tool_names=["crop_monitoring", "weather_update"])
-)
-
-# =============================
-# Specialists
-# =============================
-soil_agent = base_agent.clone(
-    name="SoilExpert",
-    instructions="You specialize in soil health and fertility. Provide actionable advice.",
-    model_settings=ModelSettings(temperature=0.2)
-)
-
-crop_agent = base_agent.clone(
-    name="CropExpert",
-    instructions="You specialize in crop yield, rotation, NDVI monitoring, and weather impact.",
-    model_settings=ModelSettings(temperature=0.3)
-)
-
-economics_agent = base_agent.clone(
-    name="AgriEconomist",
-    instructions="Focus on agricultural economics, market trends, and profitability.",
-    model_settings=ModelSettings(temperature=0.2)
-)
-
-# =============================
-# Advanced Handoff Example
-# =============================
 class EscalationData(BaseModel):
     reason: str
     field_id: str
 
 async def on_escalation(ctx: RunContextWrapper, input_data: EscalationData):
-    print(f"HANDOFF: Escalating field {input_data.field_id} due to {input_data.reason}")
+    quick_response = f"🚨 Urgent issue detected in field {input_data.field_id}: {input_data.reason}.\n\n"
+    quick_response += "✅ Quick advice:\n"
+    quick_response += "- Inspect the crop immediately to confirm if pests (like fall armyworm or stem borers) are present.\n"
+    quick_response += "- If leaves are yellowing, apply a quick foliar nitrogen spray (e.g., urea 2% solution).\n"
+    quick_response += "- Remove and destroy heavily infested leaves if possible.\n"
+    quick_response += "- If pest pressure is high, apply a recommended pesticide such as Spinosad or Emamectin Benzoate (follow local guidelines).\n"
+    quick_response += "- Ensure adequate irrigation, as stress worsens yellowing.\n"
+    quick_response += "\n👉 Would you like to escalate this to a professional agronomist for tailored guidance? (yes/no)"
+    return quick_response
 
-escalation_agent = Agent(name="AgriEscalationAgent")
+escalation_agent = Agent(
+    name="AgriEscalationAgent",
+    instructions="""
+    Handle urgent soil or crop issues (e.g., pests, diseases, crop stress).
+    
+    - Always suggest a quick and practical immediate solution first.  
+    - Then, ask the user: "Would you like to escalate this to a professional agronomist for detailed support?"  
+    - If the user says YES → provide the following contact:
+        Agronomist: Aleema Saleem
+        Phone: +92 123456789
+    - If the user says NO → continue giving advice yourself.
+    """
+)
+
 escalation_handoff = handoff(
     agent=escalation_agent,
     tool_name_override="escalate_to_expert",
@@ -216,27 +168,124 @@ escalation_handoff = handoff(
     input_filter=remove_all_tools
 )
 
-# =============================
-# Multi-Agent Coordination
-# =============================
+base_agent = Agent(
+    name="AgroDeepSearchAgent",
+    instructions=lambda context, agent: stateful_agri.get_instructions(context, agent),
+    tools=[agri_search, crop_monitoring, counter_tool],
+    model=ctx.model,
+    model_settings=ModelSettings(temperature=0.4),
+    tool_use_behavior=StopAtTools(stop_at_tool_names=["crop_monitoring"]),
+    handoffs=[escalation_handoff]
+)
+
+soil_agent = base_agent.clone(
+    name="SoilExpert",
+    instructions="You specialize in soil health and fertility. Provide actionable advice.",
+    model_settings=ModelSettings(temperature=0.2)
+)
+
+
+crop_agent = base_agent.clone(
+    name="CropExpert",
+    instructions="""
+    You are an expert agronomist specializing in crop yield estimation, 
+    crop rotation planning, and NDVI (Normalized Difference Vegetation Index) monitoring. 
+
+        You specialize in crop yield prediction, crop rotation, and NDVI-based monitoring.
+    
+    - Always check if the user provides location (coordinates) and date range.
+    - If they are missing, ask the user to provide them before making predictions.
+    - If NDVI or other environmental data is available, analyze it and give insights on crop health, stress, and growth stage.
+    - If data is insufficient, politely explain what additional info is required.
+    - If the user asks about crop health, use NDVI ranges
+      to provide meaningful recommendations.
+    - If the user asks for advice on yield, irrigation, or fertilizer, 
+      give context-aware guidance for better crop management.
+    """,
+    model_settings=ModelSettings(temperature=0.3)
+)
+
+economics_agent = base_agent.clone(
+    name="AgriEconomist",
+    instructions="Focus on agricultural economics, market trends, and profitability.",
+    model_settings=ModelSettings(temperature=0.2)
+)
+
+async def route_question(question: str) -> List[Agent]:
+    """Use LLM to decide which agents should answer."""
+    router_prompt = f"""
+    You are a router for agronomy questions.
+    Decide which experts should answer the following question:
+    "{question}"
+
+    Available experts:
+    - SoilExpert: soil health, fertility, pH, nutrients
+    - CropExpert: crop yield, NDVI, crop monitoring, rotation
+    - AgriEconomist: pricing, markets, profitability
+    - Escalation: urgent, problem, disease, pest outbreak
+    - BaseAgent: general agronomy knowledge
+
+    Return a comma-separated list of experts.
+    """
+
+    # ✅ Correct way: use Runner.run with the base agent + router prompt
+    router_result = await Runner.run(
+        base_agent,
+        router_prompt,
+        max_turns=1
+    )
+
+    decision = router_result.final_output.lower()
+
+    selected = []
+    if "soil" in decision:
+        selected.append(soil_agent)
+    if "crop" in decision:
+        selected.append(crop_agent)
+    if "economist" in decision or "economics" in decision:
+        selected.append(economics_agent)
+    if "escalation" in decision or "urgent" in decision or "problem" in decision:
+        return ["escalate"]  # special case
+    if not selected:
+        selected.append(base_agent)  # fallback
+
+    return selected
+
 async def run_agronomy_team(question: str) -> str:
     synthesis = ""
-    # Decide if question requires escalation
-    if "urgent" in question.lower() or "problem" in question.lower():
-        result = await Runner.run(base_agent, question)
-        # Trigger handoff to escalation agent
-        handoff_input = EscalationData(reason="Detected complex issue", field_id="Field-001")
-        await escalation_handoff.on_handoff(RunContextWrapper({}), handoff_input)
-        synthesis += f"\n--- Escalation Handoff Triggered ---\n{result.final_output}\n"
+    agents_to_run = await route_question(question)
+
+    if agents_to_run == ["escalate"]:
+        result = await Runner.run(base_agent, question, max_turns=5)
+        print(f"\n--- Escalation Triggered ---\n{result.final_output}\n")
+        
+        confirm = input("👉 Do you want to contact an agronomist? (yes/no): ").strip().lower()
+        if confirm in ("yes", "y"):
+            print("\n📞 Contact Agronomist:\nAleema Saleem\n+92 3378288720\n")
+        else:
+            print("\n👍 Okay, you can continue with the quick advice given above. Let me know if you need more guidance.\n")    
+
     else:
-        for expert in [soil_agent, crop_agent, economics_agent]:
-            result = await Runner.run(expert, f"Answer question: {question}", max_turns=5)
-            synthesis += f"\n--- {expert.name} ---\n{result.final_output}\n"
+        collected = []
+        for expert in agents_to_run:
+            result = await Runner.run(expert, question, max_turns=5)
+            collected.append(result.final_output)
+
+        # Merge results into one response (remove duplicates & overlap)
+        synthesis_prompt = f"""
+        Combine the following expert answers into one clear, non-repetitive response
+        for the user. Keep the most important actionable advice, and remove duplicates.
+
+        Question: {question}
+
+        Expert Answers:
+        {' '.join(collected)}
+        """
+
+        synthesis_result = await Runner.run(base_agent, synthesis_prompt, max_turns=2)
+        synthesis = synthesis_result.final_output
     return synthesis
 
-# =============================
-# Interactive Loop
-# =============================
 async def main() -> None:
     print("🌱 Agronomy Deep Research Agent ready! Type 'exit' to quit.\n")
     while True:
