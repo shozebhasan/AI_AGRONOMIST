@@ -63,9 +63,13 @@ Example interaction:
 Here are some sample queries you can try:
 
 🌾 "Give NDVI for region [[74.0,31.5],[74.1,31.5],[74.1,31.6],[74.0,31.6]] between 2025-01-01 and 2025-01-31"
+
 🧪 "How can I improve soil fertility in sandy soil?"
+
 📈 "What is the expected yield of wheat in Punjab this season?"
+
 💧 "How much irrigation is recommended for rice at the tillering stage?"
+
 💹 "What are the current market prices of basmati rice in Pakistan?"
 
 ### 👨‍💻 What Each Agent Does
@@ -110,6 +114,7 @@ Contributions are welcome!
 Fork the repo
 Create a feature branch
 Submit a Pull Request
+
 
 
 
