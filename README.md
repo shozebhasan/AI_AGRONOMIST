@@ -38,7 +38,9 @@ source .venv/bin/activate   # Linux/Mac
 
 ### 3. Setup environment variables
 OPENAI_API_KEY=your_openai_api_key
+
 GEMINI_API_KEY=your_gemini_api_key
+
 TAVILY_API_KEY=your_tavily_api_key
 
 ### 4. Authenticate Google Earth Engine
@@ -114,6 +116,7 @@ Contributions are welcome!
 Fork the repo
 Create a feature branch
 Submit a Pull Request
+
 
 
 
