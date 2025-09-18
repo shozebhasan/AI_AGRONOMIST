@@ -6,7 +6,7 @@ import ee  # Google Earth Engine
 from pydantic import BaseModel
 from typing import List
 
-ee.Initialize(project='agronomist-project-489426750713')
+ee.Initialize(project='agronomist-project')
 
 from tavily import TavilyClient
 from agents import (
