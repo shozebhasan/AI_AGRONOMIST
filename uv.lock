@@ -325,6 +325,7 @@ dependencies = [
     { name = "earthengine-api" },
     { name = "openai" },
     { name = "openai-agents" },
+    { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "tavily-python" },
 ]
@@ -334,6 +335,7 @@ requires-dist = [
     { name = "earthengine-api", specifier = ">=1.6.8" },
     { name = "openai", specifier = ">=1.99.9" },
     { name = "openai-agents", specifier = ">=0.2.4" },
+    { name = "pydantic", specifier = ">=2.0.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
     { name = "tavily-python", specifier = ">=0.7.10" },
 ]
