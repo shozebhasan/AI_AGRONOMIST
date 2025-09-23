@@ -5,8 +5,21 @@ from dotenv import load_dotenv
 import ee  # Google Earth Engine
 from pydantic import BaseModel
 from typing import List
+import uuid
 
-ee.Initialize(project='agronomist-project')
+from db import (
+    init_db,
+    async_save_message,
+    async_get_history,
+    async_get_or_create_user,
+)
+
+
+
+
+load_dotenv()  # load .env file
+project_id = os.getenv("GEE_PROJECT_ID")
+ee.Initialize(project=project_id)
 
 from tavily import TavilyClient
 from agents import (
@@ -250,13 +263,21 @@ async def route_question(question: str) -> List[Agent]:
         selected.append(base_agent)  # fallback
 
     return selected
-
-async def run_agronomy_team(question: str) -> str:
+#changed
+async def run_agronomy_team(question: str, session_memory: list) -> str:
     synthesis = ""
     agents_to_run = await route_question(question)
 
+    # Build message list with memory
+    messages = session_memory + [{"role": "user", "content": question}]
+
     if agents_to_run == ["escalate"]:
-        result = await Runner.run(base_agent, question, max_turns=5)
+        # 🚨 Escalation case with memory
+        result = await Runner.run(
+            base_agent,
+            messages,
+            max_turns=5
+        )
         print(f"\n--- Escalation Triggered ---\n{result.final_output}\n")
         
         confirm = input("👉 Do you want to contact an agronomist? (yes/no): ").strip().lower()
@@ -265,10 +286,17 @@ async def run_agronomy_team(question: str) -> str:
         else:
             print("\n👍 Okay, you can continue with the quick advice given above. Let me know if you need more guidance.\n")    
 
+        return result.final_output
+
     else:
+        # 👩‍🌾 Expert case with memory
         collected = []
         for expert in agents_to_run:
-            result = await Runner.run(expert, question, max_turns=5)
+            result = await Runner.run(
+                expert,
+                messages,
+                max_turns=5
+            )
             collected.append(result.final_output)
 
         # Merge results into one response (remove duplicates & overlap)
@@ -282,26 +310,81 @@ async def run_agronomy_team(question: str) -> str:
         {' '.join(collected)}
         """
 
-        synthesis_result = await Runner.run(base_agent, synthesis_prompt, max_turns=2)
+        synthesis_messages = session_memory + [{"role": "user", "content": synthesis_prompt}]
+        synthesis_result = await Runner.run(
+            base_agent,
+            synthesis_messages,
+            max_turns=2
+        )
         synthesis = synthesis_result.final_output
-    return synthesis
+        return synthesis
+
 
 async def main() -> None:
     print("🌱 Agronomy Deep Research Agent ready! Type 'exit' to quit.\n")
+
+    await init_db()
+
+    # Ask username once
+    user_name = input("👤 Enter your display name (will be used to store your chats): ").strip()
+    if not user_name:
+        print("⚠️ No name entered. Defaulting to 'guest'")
+        user_name = "guest"
+
+    user = await async_get_or_create_user(user_name)
+    user_id = user.id
+    print(f"✅ Welcome, {user.name}! Your chats will be saved under user_id={user_id}\n")
+
     while True:
         try:
             question = input("❓ Ask your agronomy question: ").strip()
             if question.lower() in ("exit", "quit"):
                 print("👋 Goodbye!")
                 break
+
+            # Show history if requested
+            if question.startswith("/history"):
+                try:
+                    limit = int(question.split(" ")[1])
+                except (IndexError, ValueError):
+                    limit = 10
+                history = await async_get_history(user_id, limit)
+                print("\n📜 Your recent chat history:")
+                for h in history:
+                    role = "👤 You" if h.role == "user" else "🤖 Agronomist"
+                    print(f"{role}: {h.content}")
+                print("")
+                continue
+
             if question:
                 stateful_agri.previous_queries.append(question)
+
+            # Save user input to DB
+            await async_save_message(user_id, "user", question)
+
+            # 🔑 Build session memory from DB (last 20 turns)
+            history_msgs = await async_get_history(user_id, limit=20)
+            session_memory = [
+                {"role": msg.role, "content": msg.content} for msg in history_msgs
+            ]
+            # saved memory name
+            session_memory.insert(0, {
+             "role": "system",
+             "content": f"The user's name is {user.name}. Address them personally in responses."
+                })
+
             print("\n💬 Thinking...\n")
-            team_result = await run_agronomy_team(question)
+            team_result = await run_agronomy_team(question, session_memory)
+
+            # Print + save assistant reply
             print(team_result)
+            await async_save_message(user_id, "assistant", team_result)
+
         except (KeyboardInterrupt, EOFError):
             print("\n👋 Session ended.")
             break
+
+
 
 if __name__ == "__main__":
     asyncio.run(main())

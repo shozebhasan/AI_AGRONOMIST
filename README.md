@@ -56,7 +56,7 @@ Example interaction:
 🌱 Agronomy Deep Research Agent ready! Type 'exit' to quit.
 ❓ Ask your agronomy question: Give NDVI for region [[74.0,31.5],[74.1,31.5],[74.1,31.6],[74.0,31.6]] between 2025-01-01 and 2025-01-31
 
-💬 Thinking...
+💬 Thinking...l
 
 📊 Mean NDVI for 2025-01-01 to 2025-01-31: 0.672
 
