@@ -24,7 +24,7 @@ CROP_CLASSIFIER = tf.keras.models.load_model(CROP_CLASSIFIER_PATH, compile=False
 
 with open(os.path.join(MODEL_DIR, "class_indices.json"), "r") as f:
     CROP_CLASS_INDICES = json.load(f)
-    # invert mapping if needed
+    # invert mapping 
     if all(not k.isdigit() for k in CROP_CLASS_INDICES.keys()):
         CROP_CLASS_INDICES = {int(v): k for k, v in CROP_CLASS_INDICES.items()}
 
@@ -45,7 +45,7 @@ FALLBACK_LABELS = {
     "rice":   {0:"bacterial_leaf_blight",1:"brown_spot",2:"healthy",3:"leaf_blast",4:"leaf_scald",5:"narrow_brown_spot"}
 }
 
-# ---------------- helpers ----------------
+# helpers
 
 def predict_crop_from_classifier(b64_image: str):
     pil_img = decode_base64_to_pil(b64_image)
@@ -141,7 +141,7 @@ def preprocess_for_model(pil_img: Image.Image, target_size=(224,224), channels=3
     arr = arr / 255.0
     return np.expand_dims(arr, axis=0).astype(np.float32)
 
-# ---------------- load all models ----------------
+# load all models
 MODELS = {}
 META = {}
 
@@ -160,7 +160,7 @@ for name in ("cotton","wheat","corn","rice"):
     }
     print(f"[vision] {name} input_shape: {m.input_shape}, target_size: {target_size}, channels: {channels}")
 
-# ---------------- prediction ----------------
+#  prediction 
 def _predict_generic(name: str, b64_image: str):
     model = MODELS[name]
     meta = META[name]
@@ -230,7 +230,7 @@ def predict_crop_from_base64(b64_image: str, crop_name: str):
     return _predict_generic(name, b64_image)
 
 
-# ---------------- Auto-detect & analyze helpers ----------------
+#  Auto-detect & analyze helpers
 
 
 
@@ -277,18 +277,17 @@ def analyze_image_auto(b64_image: str, require_threshold: float = 0.60):
     crop_name, crop_conf, second_crop, second_conf, gap = predict_crop_from_classifier(b64_image)
     print(f"[vision] Crop classifier top: {crop_name} ({crop_conf:.2f}), second: {second_crop} ({second_conf:.2f}), gap={gap:.2f}")
 
-    # 🚫 Case 1: Very low confidence (< 60%) → Reject
+    #  Case 1: Very low confidence (< 60%) → Reject
     if crop_conf < 0.60:
         return {
             "mode": "rejected",
             "status": "Rejected",
             "label": "Unknown crop",
-            "confidence": crop_conf,
             "description": (
-                f"I'm not confident in the crop type (confidence: {crop_conf:.2f}). "
+                f"It appears you have entered a wrong image, I can only detect and give advice on crop images "
                 f"Please upload a relevant image of wheat, corn, rice, or cotton."
             ),
-            "advice": "Try to capture a clear leaf image from one of the supported crops."
+            "advice": "Try to capture a clear leaf image from a real crop."
         }
 
     # ⚠️ Case 2: Moderate confidence (60–79%) OR high confidence but small gap (< 0.10) → Dual prediction
