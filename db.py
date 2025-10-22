@@ -20,7 +20,7 @@ from sqlalchemy import (
     Boolean
 )
 from sqlalchemy.pool import NullPool
-from typing import Optional, List
+from typing import Optional, List, Dict
 from dotenv import load_dotenv
 import hashlib
 
@@ -114,6 +114,33 @@ class PasswordResetToken(Base):
     used = Column(Boolean, default=False)  # This uses sqlalchemy.Boolean
     created_at = Column(DateTime, default=datetime.utcnow)
 
+#new
+
+class UserFact(Base):
+    __tablename__ = "user_facts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    key = Column(String(100), nullable=False)
+    value = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", backref="facts")
+
+
+class AddToMemory(Base):
+    __tablename__ = "add_to_memory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", backref="memory_entries")
+
+
 
 
 # Password hashing helpers
@@ -160,6 +187,23 @@ async def async_get_or_create_user(email: str, name: str) -> User:
         await session.commit()
         await session.refresh(new_user)
         return new_user
+    
+#new
+async def async_get_user_memory(user_id: int) -> Optional[str]:
+    async with async_session_maker() as session:
+        result = await session.execute(select(User.memory).where(User.id == user_id))
+        return result.scalar_one_or_none()
+
+async def async_update_user_memory(user_id: int, new_memory: str) -> bool:
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user = result.scalars().first()
+        if user:
+            user.memory = new_memory
+            await session.commit()
+            return True
+        return False
+
 
 
 async def async_create_conversation(user_id: int, title: str = "New Chat") -> Optional[int]:
@@ -366,3 +410,48 @@ async def async_update_user_password(email: str, new_password: str) -> bool:
             await session.commit()
             return True
         return False
+
+
+async def save_user_fact(user_id: int, key: str, value: str):
+    async with async_session_maker() as session:
+        # Check if fact exists
+        result = await session.execute(
+            select(UserFact).where(UserFact.user_id == user_id, UserFact.key == key)
+        )
+        fact = result.scalars().first()
+        if fact:
+            fact.value = value
+            fact.updated_at = datetime.utcnow()
+        else:
+            session.add(UserFact(user_id=user_id, key=key, value=value))
+        await session.commit()
+
+async def get_user_facts(user_id: int) -> Dict[str, str]:
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(UserFact.key, UserFact.value).where(UserFact.user_id == user_id)
+        )
+        return {key: value for key, value in result.all()}
+
+async def add_memory_entry(user_id: int, content: str):
+    async with async_session_maker() as session:
+        session.add(AddToMemory(user_id=user_id, content=content))
+        await session.commit()
+
+        # Prune to last 15
+        result = await session.execute(
+            select(AddToMemory.id).where(AddToMemory.user_id == user_id).order_by(desc(AddToMemory.created_at))
+        )
+        ids = [r for r in result.scalars().all()]
+        if len(ids) > 15:
+            await session.execute(
+                delete(AddToMemory).where(AddToMemory.id.not_in(ids[:6]))
+            )
+            await session.commit()
+
+async def get_recent_memory(user_id: int) -> str:
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(AddToMemory.content).where(AddToMemory.user_id == user_id).order_by(desc(AddToMemory.created_at)).limit(15)
+        )
+        return "\n".join(reversed(result.scalars().all()))

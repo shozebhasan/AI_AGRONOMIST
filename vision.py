@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 import tensorflow as tf
+import time
 
 
 MODEL_DIR = os.path.join("models")
@@ -50,7 +51,11 @@ FALLBACK_LABELS = {
 def predict_crop_from_classifier(b64_image: str):
     pil_img = decode_base64_to_pil(b64_image)
     tensor = preprocess_for_model(pil_img, target_size=(224,224), channels=3)
+
+    start = time.perf_counter()
     preds = CROP_CLASSIFIER.predict(tensor, verbose=0)[0]
+    end = time.perf_counter()
+    print(f"⏱️ Crop classifier took {end - start:.2f} seconds")
 
     sorted_indices = np.argsort(preds)[::-1]
     top_idx = sorted_indices[0]
@@ -177,7 +182,11 @@ def _predict_generic(name: str, b64_image: str):
     tensor = preprocess_for_model(pil_img, target_size=target_size, channels=channels)
     print(f"[vision] tensor shape for {name}: {tensor.shape}")
 
+    start = time.perf_counter()
     preds = model.predict(tensor, verbose=0)[0]
+    end = time.perf_counter()
+    print(f"⏱️ Disease model ({name}) took {end - start:.2f} seconds")
+
     sorted_indices = np.argsort(preds)[::-1]
     top_idx = sorted_indices[0]
     second_idx = sorted_indices[1]
@@ -274,6 +283,7 @@ def _get_advice_for_label(crop_name: str, label: str):
 
 # ---------------- High-level auto analyze ----------------
 def analyze_image_auto(b64_image: str, require_threshold: float = 0.60):
+    start = time.perf_counter()
     crop_name, crop_conf, second_crop, second_conf, gap = predict_crop_from_classifier(b64_image)
     print(f"[vision] Crop classifier top: {crop_name} ({crop_conf:.2f}), second: {second_crop} ({second_conf:.2f}), gap={gap:.2f}")
 
@@ -325,6 +335,9 @@ def analyze_image_auto(b64_image: str, require_threshold: float = 0.60):
     result["mode"] = "auto"
     result["crop_confidence"] = crop_conf
     result["uncertain"] = result.get("uncertain", False)
+
+    end = time.perf_counter()
+    print(f"⏱️ Full vision pipeline took {end - start:.2f} seconds")
     return result
 
 

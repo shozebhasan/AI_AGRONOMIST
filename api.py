@@ -1,5 +1,6 @@
 import hashlib
 import asyncio
+import time
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 import base64
@@ -25,20 +26,22 @@ from db import (
     check_db_health,
     async_get_or_create_user,
     async_create_conversation,
-    async_get_or_create_conversation,
     async_save_message,
     async_get_history,
     async_get_conversations_for_user,
     async_get_messages_for_conversation,
     async_session_maker,
-    async_update_conversation_title,  # Add this import
     User,
     Conversation,
     async_delete_conversation,
     async_create_password_reset_token,
     async_update_user_password,
     async_verify_password_reset_token,
-    async_use_password_reset_token
+    async_use_password_reset_token,
+    get_user_facts,
+    get_recent_memory,
+    add_memory_entry,
+    save_user_fact
     
 )
 
@@ -412,7 +415,10 @@ async def chat_with_agent(request: Request):
         if chat_req.images and len(chat_req.images) > 0:
             try:
                 # Always use auto pipeline: crop classifier → disease model
+                start_vision = time.perf_counter()
                 analysis = analyze_image_auto(chat_req.images[0], require_threshold=0.60)
+                end_vision = time.perf_counter()
+                print(f"⏱️ Vision analysis took {end_vision - start_vision:.2f} seconds")
 
                 if analysis["mode"] == "rejected":
                     vision_results = analysis
@@ -489,7 +495,53 @@ async def chat_with_agent(request: Request):
             user_message_to_save = f"[Image] {user_message_to_save}"
         await async_save_message(user.id, "user", user_message_to_save, db_conversation_id)
 
+        # Inject recent assistant memory only
+        recent_memory = await get_recent_memory(user.id)
+        if recent_memory:
+            full_message = f"[RECENT MEMORY]\n{recent_memory}\n\n[USER MESSAGE]\n{full_message}"
+
+        # Extract and store persistent user facts
+        msg_lower = (chat_req.message or "").lower()
+
+        # Extract name
+        if "my name is" in msg_lower:
+            try:
+                name_part = msg_lower.split("my name is")[-1].strip()
+                name = name_part.split()[0].capitalize()
+                await save_user_fact(user.id, "name", name)
+            except Exception as e:
+                print(f"❌ Name extraction failed: {e}")
+
+        # Extract crop interests
+        crop_phrases = ["i grow", "i farm", "my crops are", "i cultivate"]
+        for phrase in crop_phrases:
+            if phrase in msg_lower:
+                try:
+                    crop_part = msg_lower.split(phrase)[-1].split(".")[0].strip()
+                    await save_user_fact(user.id, "crop_interests", crop_part)
+                    break
+                except Exception as e:
+                    print(f"❌ Crop extraction failed: {e}")
+
+        # Conditional recall of persistent facts
+        if "what's my name" in msg_lower or "do you know my name" in msg_lower:
+            facts = await get_user_facts(user.id)
+            name = facts.get("name", None)
+            response_text = f"Your name is {name}." if name else "I don't have your name saved yet."
+            await async_save_message(user.id, "assistant", response_text, db_conversation_id)
+            return ChatResponse(response=response_text, conversation_id=str(db_conversation_id), success=True)
+
+        if "what crops do i grow" in msg_lower or "what are my crops" in msg_lower or "do you remember my crops" in msg_lower:
+            facts = await get_user_facts(user.id)
+            crops = facts.get("crop_interests", None)
+            response_text = f"You grow {crops}." if crops else "I don't have your crop interests saved yet."
+            await async_save_message(user.id, "assistant", response_text, db_conversation_id)
+            return ChatResponse(response=response_text, conversation_id=str(db_conversation_id), success=True)
+
+
+
         # Process with agronomy team pass vision_results if available
+        start_agent = time.perf_counter()
         response_text = await process_with_agronomy_team(
             message=full_message,
             email=chat_req.email,
@@ -497,9 +549,15 @@ async def chat_with_agent(request: Request):
             language=language,
             vision_data=vision_results  
         )
+        end_agent = time.perf_counter()
+        print(f"⏱️ Agent response took {end_agent - start_agent:.2f} seconds")
 
         # Save assistant response
         await async_save_message(user.id, "assistant", response_text, db_conversation_id)
+
+        await add_memory_entry(user.id, response_text)
+
+
 
         # Update conversation title 
         async with async_session_maker() as session:

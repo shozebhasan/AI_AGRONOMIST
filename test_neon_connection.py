@@ -1,4 +1,4 @@
-# test_neon_connection.py
+
 import asyncio
 from db import init_db, check_db_health, async_get_or_create_user, async_save_message
 

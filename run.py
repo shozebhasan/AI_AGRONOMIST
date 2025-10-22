@@ -1,5 +1,4 @@
-# run.py
-#!/usr/bin/env python3
+
 """
 Development server runner for Agronomist AI API
 """

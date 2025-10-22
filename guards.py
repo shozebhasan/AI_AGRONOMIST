@@ -1,7 +1,7 @@
-# guards.py
+
 import re
 
-# Simple list of offensive/abusive words (expand as needed)
+# list of blocked words
 BLOCKED_WORDS = [
      "stupid", "idiot", "hate", "kill"
 ]

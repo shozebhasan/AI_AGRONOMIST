@@ -1,4 +1,4 @@
-# reset_db_fixed.py - Fixed database reset script
+
 import asyncio
 import os
 from datetime import datetime
@@ -14,7 +14,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL not found in .env")
 
-# Proper Neon connection
+# Neon connection
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
@@ -35,7 +35,7 @@ engine = create_async_engine(
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 Base = declarative_base()
 
-# Correct Database Models with password_hash
+#  Database Models
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
