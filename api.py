@@ -1,19 +1,13 @@
 import hashlib
 import asyncio
 import time
-from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 import base64
-import io
-import traceback
-from fastapi import File, UploadFile, Form
-from PIL import Image
 from vision import analyze_image_auto
 
 from fastapi import FastAPI
 from fastapi import Path
 from fastapi import Request
-from fastapi import Query     #del
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -41,7 +35,8 @@ from db import (
     get_user_facts,
     get_recent_memory,
     add_memory_entry,
-    save_user_fact
+    save_user_fact,
+    save_chat_image
     
 )
 
@@ -413,6 +408,13 @@ async def chat_with_agent(request: Request):
         vision_results = None  
         
         if chat_req.images and len(chat_req.images) > 0:
+
+            for image_str in chat_req.images:
+                try:
+                    image_bytes = base64.b64decode(image_str)
+                    await save_chat_image(user.id, db_conversation_id, image_bytes)
+                except Exception as e:
+                    print(f"❌ Image decode failed: {e}")
             try:
                 # Always use auto pipeline: crop classifier → disease model
                 start_vision = time.perf_counter()
@@ -440,11 +442,9 @@ async def chat_with_agent(request: Request):
                 elif analysis["mode"] == "auto_uncertain_dual":
                     vision_results = analysis
                     detection_summary = (
-                        f"⚠️ The crop classifier was uncertain between two crops.\n\n"
-                        f"**Prediction 1:** {analysis['crop_1'].capitalize()} — {analysis['label_1']} ({analysis['status_1']})\n"
-                        f"{analysis['advice_1']}\n\n"
-                        f"**Prediction 2:** {analysis['crop_2'].capitalize()} — {analysis['label_2']} ({analysis['status_2']})\n"
-                        f"{analysis['advice_2']}"
+                        f"⚠️ The crop classifier was uncertain.\n\n"
+                        f"{analysis['description']}\n\n"
+                        f"{analysis['advice']}"
                     )
                 
                 else:

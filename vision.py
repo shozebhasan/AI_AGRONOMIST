@@ -295,38 +295,25 @@ def analyze_image_auto(b64_image: str, require_threshold: float = 0.60):
             "label": "Unknown crop",
             "description": (
                 f"It appears you have entered a wrong image, I can only detect and give advice on crop images "
-                f"Please upload a relevant image of wheat, corn, rice, or cotton."
+                f"Please upload a relevant image."
             ),
             "advice": "Try to capture a clear leaf image from a real crop."
         }
 
-    # ⚠️ Case 2: Moderate confidence (60–79%) OR high confidence but small gap (< 0.10) → Dual prediction
+    # ⚠️ Case 2: Moderate confidence (60–79%) OR high confidence but small gap (< 0.10) → Ask user to confirm crop
     if crop_conf < 0.80 or gap < 0.10:
-        result_1 = _predict_generic(crop_name, b64_image)
-        result_2 = _predict_generic(second_crop, b64_image)
-
-        advice_1 = _get_advice_for_label(crop_name, result_1["label"])
-        advice_2 = _get_advice_for_label(second_crop, result_2["label"])
-
         return {
             "mode": "auto_uncertain_dual",
+            "status": "Uncertain",
             "crop_1": crop_name,
             "crop_2": second_crop,
-            "crop_confidence": crop_conf,
-            "second_confidence": second_conf,
-            "label_1": result_1["label"],
-            "label_2": result_2["label"],
-            "status_1": result_1["status"],
-            "status_2": result_2["status"],
-            "advice_1": advice_1,
-            "advice_2": advice_2,
             "description": (
-                f"The crop classifier was uncertain between **{crop_name}** and **{second_crop}**.\n"
-                f"For **{crop_name}**, it predicted: **{result_1['label']}** ({result_1['status']})\n"
-                f"For **{second_crop}**, it predicted: **{result_2['label']}** ({result_2['status']})"
-            ),
-            "uncertain": True
+                f"I have detected these 2 crops: **{crop_name}** and **{second_crop}**, kindly confirm your crop "
+                f"so I can proceed with a more accurate disease diagnosis."
+                ),
+            "advice": "Please reply with the name of your crop (e.g., 'My crop is wheat') so I can continue."
         }
+
 
     # ✅ Case 3: High confidence (≥ 80%) and clear gap → Proceed
     result = _predict_generic(crop_name, b64_image)

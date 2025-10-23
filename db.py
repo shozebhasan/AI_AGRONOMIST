@@ -14,10 +14,9 @@ from sqlalchemy import (
     select,
     desc,
     func,
-    text,
-    update,
     delete,
-    Boolean
+    Boolean,
+    LargeBinary
 )
 from sqlalchemy.pool import NullPool
 from typing import Optional, List, Dict
@@ -141,6 +140,22 @@ class AddToMemory(Base):
     user = relationship("User", backref="memory_entries")
 
 
+class ChatImage(Base):
+    __tablename__ = "chat_images"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
+    filename = Column(String, nullable=False)
+    content_type = Column(String)
+    image_data = Column(LargeBinary, nullable=False)
+    uploaded_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", backref="images")
+    conversation = relationship("Conversation", backref="images")
+
+
+
 
 
 # Password hashing helpers
@@ -188,22 +203,6 @@ async def async_get_or_create_user(email: str, name: str) -> User:
         await session.refresh(new_user)
         return new_user
     
-#new
-async def async_get_user_memory(user_id: int) -> Optional[str]:
-    async with async_session_maker() as session:
-        result = await session.execute(select(User.memory).where(User.id == user_id))
-        return result.scalar_one_or_none()
-
-async def async_update_user_memory(user_id: int, new_memory: str) -> bool:
-    async with async_session_maker() as session:
-        result = await session.execute(select(User).where(User.id == user_id))
-        user = result.scalars().first()
-        if user:
-            user.memory = new_memory
-            await session.commit()
-            return True
-        return False
-
 
 
 async def async_create_conversation(user_id: int, title: str = "New Chat") -> Optional[int]:
@@ -218,30 +217,6 @@ async def async_create_conversation(user_id: int, title: str = "New Chat") -> Op
         await session.refresh(new_conv)
         return new_conv.id
 
-
-async def async_get_or_create_conversation(user_id: int) -> int:
-    async with async_session_maker() as session:
-        result = await session.execute(
-            select(Conversation).where(Conversation.user_id == user_id).order_by(desc(Conversation.created_at))
-        )
-        conv = result.scalars().first()
-        if conv:
-            return conv.id
-        return await async_create_conversation(user_id, "New Chat")
-
-#new update
-async def async_update_conversation_title(conversation_id: int, new_title: str) -> bool:
-    """Update the title of a conversation."""
-    async with async_session_maker() as session:
-        result = await session.execute(
-            select(Conversation).where(Conversation.id == conversation_id)
-        )
-        conv = result.scalars().first()
-        if not conv:
-            return False
-        conv.title = new_title
-        await session.commit()
-        return True
 
 async def async_save_message(user_id: int, role: str, content: str, conversation_id: Optional[int] = None) -> Message:
     """Save a message and return the saved Message object."""
@@ -280,7 +255,6 @@ async def async_get_history(user_id: int, limit: int = 50):
 
 # delete chats from sidebar
 
-
 async def async_delete_conversation(conversation_id: int) -> bool:
     """
     Permanently delete conversation and its messages.
@@ -292,6 +266,8 @@ async def async_delete_conversation(conversation_id: int) -> bool:
         conv = result.scalars().first()
         if not conv:
             return False
+
+        await session.execute(delete(ChatImage).where(ChatImage.conversation_id == conversation_id))
 
         # Delete messages explicitly (safe even if cascade configured)
         await session.execute(delete(Message).where(Message.conversation_id == conversation_id))
@@ -455,3 +431,17 @@ async def get_recent_memory(user_id: int) -> str:
             select(AddToMemory.content).where(AddToMemory.user_id == user_id).order_by(desc(AddToMemory.created_at)).limit(15)
         )
         return "\n".join(reversed(result.scalars().all()))
+
+
+
+async def save_chat_image(user_id: int, conversation_id: int, image_data: bytes, filename: str = "uploaded.jpg", content_type: str = "image/jpeg"):
+    async with async_session_maker() as session:
+        session.add(ChatImage(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            filename=filename,
+            content_type=content_type,
+            image_data=image_data
+        ))
+        await session.commit()
+

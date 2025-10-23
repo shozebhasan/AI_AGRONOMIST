@@ -9,7 +9,6 @@ Usage:
 import sys
 import os
 import base64
-from pathlib import Path
 
 # Add parent directory to path if needed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
