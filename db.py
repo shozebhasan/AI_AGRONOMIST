@@ -1,4 +1,3 @@
-
 import os
 import ssl
 from datetime import datetime
@@ -35,15 +34,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL not found in .env")
 
-# Ensure correct asyncpg prefix
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# Remove sslmode from URL if present (asyncpg doesn’t accept it)
 if "sslmode=" in DATABASE_URL:
     DATABASE_URL = DATABASE_URL.split("?")[0]
 
-# SSL context for Neon (optional; adapt to your environment)
+# SSL context for Neon 
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = True
 ssl_context.verify_mode = ssl.CERT_REQUIRED

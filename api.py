@@ -104,8 +104,6 @@ class HealthResponse(BaseModel):
     version: str
     database: str
 
-# Add to api.py after existing endpoints
-
 class ForgotPasswordRequest(BaseModel):
     email: str
 
@@ -631,22 +629,22 @@ async def delete_conversation(user_email: str, conversation_id: str = Path(...))
         print(f"❌ delete_conversation error: {e}")
         return JSONResponse(status_code=500, content={"success": False, "error": str(e)})    
 
-# ---------------------------
-# History & Conversation Endpoints (Fixed)
-# ---------------------------
+
+# History & Conversation Endpoints 
+
 @app.get("/api/history/{user_email}", response_model=HistoryResponse)
 async def get_chat_history(user_email: str, limit: int = 20):  # Reduced limit
     try:
         user = await async_get_or_create_user(user_email, user_email.split("@")[0])
 
-        # Get conversations (fast query with index)
+        # Get conversations
         conversations = await async_get_conversations_for_user(user.id)
         conversations.sort(
             key=lambda x: x.get("last_message_at") or x.get("created_at") or "",
             reverse=True,
         )
 
-        # Only get recent messages (reduced from 50 to 20)
+        # Only get recent messages
         db_messages = await async_get_history(user.id, limit=limit)
         history_data = [
             {

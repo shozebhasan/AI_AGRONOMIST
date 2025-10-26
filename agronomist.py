@@ -1,3 +1,4 @@
+
 import os
 import json
 import asyncio
@@ -35,8 +36,8 @@ from agents import (
     OpenAIChatCompletionsModel,
     set_tracing_export_api_key,
     ModelSettings,
-    function_tool,
     RunContextWrapper,
+    function_tool,
     StopAtTools,
     FunctionTool,
     handoff
@@ -120,7 +121,7 @@ class AnalysisCounter(FunctionTool):
             on_invoke_tool=self.on_invoke_tool
         )
 
-    async def on_invoke_tool(self, context, args_json_str) -> str:
+    async def on_invoke_tool(self) -> str:
         self._count += 1
         return f"📈 Total analyses performed in this session: {self._count}"
 
@@ -145,9 +146,6 @@ async def build_global_user_memory(user_id: int, max_messages: int = 200) -> str
     
     memory_source = "\n".join(lines)
     
-    # Extract name heuristically
-    import re
-    name_match = re.search(r"\b(?:my name is|i am|i'm)\s+([A-Za-z\s]{2,30})", memory_source, re.I)
     
     # Build structured extraction prompt
     memory_extraction_prompt = f"""You are extracting key user information from chat history.
@@ -185,10 +183,6 @@ Your extraction:"""
     memory_text = result.final_output.strip()
     
     
-    if "not provided" in memory_text.lower() and len(memory_text) < 100:
-        if name_match:
-            memory_text = f"- Name: {name_match.group(1).strip()}\n" + memory_text
-    
     # Persist to database
     try:
         from db import async_session_maker, User
@@ -202,9 +196,6 @@ Your extraction:"""
         print(f"⚠️ Failed to persist memory: {e}")
     
     return memory_text
-
-
-
 
 
 async def get_conversation_context(conversation_id: int, max_messages: int = 20) -> str:
@@ -284,7 +275,7 @@ escalation_handoff = handoff(
 
 # Agent factory
 
-def create_base_agent(user_email: str, global_memory: str, conversation_context: str, vision_context: str = ""):
+def create_base_agent(user_email: str, global_memory: str, conversation_context: str, vision_context: str = "", language_instructions=""):
     """Create agent with full memory and conversation context"""
     
     instructions = f"""You are an expert AI Agronomist assistant helping {user_email.split('@')[0]}.
@@ -297,19 +288,16 @@ RECENT CONVERSATION (refer to this for context):
 
 {vision_context if vision_context else ""}
 
+{language_instructions}
+
 Your responsibilities:
 - Reference past conversations naturally (e.g., "As we discussed before...")
 - Remember user's crops, location, and farming methods
-- Build upon previous advice given
 - Use agri_search for research
 - Use crop_monitoring for NDVI analysis
 - Be conversational and remember what the user has told you
 
-⚠️ LANGUAGE REQUIREMENT:
-- Always understand Roman Urdu (Urdu written in Latin script, e.g. "ap kaise ho").
-- If the user writes in Roman Urdu, respond back in Roman Urdu.
-- If the user writes in English, respond in English.
-- Never switch to Urdu script — stick to Roman Urdu when the user uses it.
+
 
 When the user refers to "last time" or "before", check the conversation context above."""
 
@@ -365,11 +353,7 @@ economics_agent = Agent(
 async def route_question_with_context(question: str, base_agent: Agent, context_agents: dict) -> List[Agent]:
     """Route question to appropriate experts with memory context"""
     
-    # Check for urgent/escalation keywords first
-    urgent_keywords = ["urgent", "emergency", "dying", "rotting", "serious condition", "help immediately", "crisis", "problem"]
-    if any(keyword in question.lower() for keyword in urgent_keywords):
-        print(f"🚨 DEBUG: Detected urgent issue - routing to escalation")
-        return ["escalate"]
+    
     
     router_prompt = f"""Which experts should answer: "{question}"
     Options: SoilExpert, CropExpert, AgriEconomist, BaseAgent
@@ -459,8 +443,25 @@ async def run_agronomy_team(
         
         print(f"🔬 Vision context added: {vision_data.get('crop')} - {vision_data.get('label')}")
     
+    language_instructions =""
+    if language == "roman-ur":
+        language_instructions = (
+            "⚠️ LANGUAGE REQUIREMENT:\n"
+            "- If the user writes in Roman Urdu, respond in Roman Urdu (Latin script).\n"
+            "- If the user writes in English, respond in English.\n"
+        )
+    elif language and language.startswith("ur"):
+        language_instructions=(
+            "⚠️ LANGUAGE REQUIREMENT:\n"
+            "- Respond in Urdu using Arabic script.\n"
+        )
+    else:
+        language_instructions=(
+            "⚠️ LANGUAGE REQUIREMENT:\n"
+            "- Respond in English.\n"
+        )
     # Create personalized base agent
-    base_agent = create_base_agent(user_email, global_memory, conversation_context, vision_context)
+    base_agent = create_base_agent(user_email, global_memory, conversation_context, vision_context, language_instructions)
     print(f"🔍 DEBUG: Agent instructions length: {len(base_agent.instructions) if isinstance(base_agent.instructions, str) else 'DYNAMIC'}")
     
     # Prepare question with image context
@@ -469,19 +470,7 @@ async def run_agronomy_team(
         question_for_model = image_context + question
     else:
         question_for_model = question
-    # Prepare the core question for the agent
-    if language and language.startswith("ur"):
-        
-        
-        question_for_model = (
-            f"{question}\n\nIMPORTANT: Reply in Urdu using standard Arabic script. "
-            "Do NOT use Roman Urdu or transliteration. Provide concise, natural Urdu text only. "
-            "Provide a complete, detailed, and natural explanation in Urdu,"
-            "matching the depth and richness you would normally give in English. "
-            "Use clear, professional Urdu suitable for farmers and agronomists."
-        )
-    else:
-        question_for_model = question
+    
     
     # Build message
     user_message = {
@@ -543,87 +532,48 @@ Your response (one word only):"""
     
     # Create only the needed specialized agent (lazy loading)
     if "soil" in decision:
-        expert = Agent(
-            name="SoilExpert",
-            instructions=f"""You are a soil health specialist with image analysis capabilities.
-
-USER CONTEXT:
-{global_memory}
-
-RECENT CONVERSATION:
-{conversation_context}
-{f"The user has shared {len(images)} image(s). Analyze any visible soil conditions, texture, color, or issues in the images." if images else ""}
-
-Provide actionable soil advice while remembering the user's context.""",
-            tools=[agri_search, crop_monitoring, counter_tool],
-            model=ctx.model,
-            model_settings=ModelSettings(temperature=0.2),
-            handoffs=[escalation_handoff]
-        )
+        expert = soil_agent
     elif "crop" in decision:
-        expert = Agent(
-            name="CropExpert",
-            instructions=f"""You are a crop yield and monitoring specialist with plant disease identification capabilities.
-
-USER CONTEXT:
-{global_memory}
-
-RECENT CONVERSATION:
-{conversation_context}
-
-{vision_context if vision_context else ""}
-
-{f"The user has shared {len(images)} image(s). Carefully analyze the plants, leaves, stems, or symptoms visible in the images. Identify any diseases, pests, nutrient deficiencies, or growth issues." if images else ""}
-
-Analyze crop health and provide growth insights while remembering context.""",
-            tools=[agri_search, crop_monitoring, counter_tool],
-            model=ctx.model,
-            model_settings=ModelSettings(temperature=0.3),
-            handoffs=[escalation_handoff]
-        )
-    elif "economics" in decision or "economic" in decision:
-        expert = Agent(
-            name="AgriEconomist",
-            instructions=f"""You are an agricultural economics specialist.
-
-USER CONTEXT:
-{global_memory}
-
-RECENT CONVERSATION:
-{conversation_context}
-
-Focus on market trends and profitability while remembering user context.""",
-            tools=[agri_search, crop_monitoring, counter_tool],
-            model=ctx.model,
-            model_settings=ModelSettings(temperature=0.2),
-            handoffs=[escalation_handoff]
-        )
+        expert = crop_agent
+    elif "economics" in decision or "economist" in decision:
+        expert = economics_agent
     else:
-        # Use base agent for general questions
         expert = base_agent
     
     # Run the selected expert
     result = await Runner.run(expert, messages, max_turns=5)
-    return result.final_output
+    response_text = result.final_output
+
+    # If Urdu requested, translate final output
+    if language and language.startswith("ur"):
+        translations = await translate_to_urdu_batch([response_text])
+        response_text = translations[0]
+
+    return response_text
+
+    
 
 
-#new code
-# ---------- translation helper (uses existing agent runner) ----------
-# simple in-memory cache to reduce duplicate translations
+
+    
+
+
+
+
+
+# translation
 _TRANSLATION_CACHE: Dict[str, str] = {}
 
 async def translate_to_urdu_batch(texts: List[str]) -> List[str]:
     """
     Translate a list of short texts to Urdu (Arabic script) in a single call.
-    We batch them into one prompt and parse a JSON array response to save API calls.
-    Returns list of translations in same order; on failure returns originals.
+    Uses a dedicated translator agent. On failure, returns originals.
     """
     if not texts:
         return []
 
     # prepare list of texts that are not cached
-    to_translate = []
-    indexes = []
+    to_translate, indexes = [], []
     results: List[str] = [None] * len(texts)  # type: ignore
 
     for i, t in enumerate(texts):
@@ -636,11 +586,9 @@ async def translate_to_urdu_batch(texts: List[str]) -> List[str]:
             to_translate.append(t)
 
     if not to_translate:
-        # all were cached or empty
         return results  # type: ignore
 
-    # Build a single prompt listing all texts and asking for JSON output
-    # We enumerate to_translate to keep a compact prompt; model should return a JSON array
+    # Build prompt
     prompt_items = "\n".join(f"{idx}: {text.replace(chr(10),' ')}" for idx, text in enumerate(to_translate))
     prompt = (
         "Translate the following items to Urdu using Arabic script. "
@@ -649,78 +597,46 @@ async def translate_to_urdu_batch(texts: List[str]) -> List[str]:
     )
 
     try:
-        # Create a lightweight temporary translator agent and run it.
-        # NOTE: this assumes Agent, ModelSettings, ctx and Runner are available in this module.
-        try:
-            translator_agent = Agent(
-                name="TranslatorAgent",
-                instructions=(
-                    "You are a concise translator. Translate the provided items into Urdu using standard Arabic script. "
-                    "Return only a JSON array of translated strings in the same order as the input. Do not add any commentary."
-                ),
-                tools=[],
-                model=ctx.model,
-                model_settings=ModelSettings(temperature=0.0),
-                handoffs=[],
-            )
+        translator_agent = Agent(
+            name="TranslatorAgent",
+            instructions=(
+                "You are a concise translator. Translate the provided items into Urdu using standard Arabic script. "
+                "Return only a JSON array of translated strings in the same order as the input. Do not add commentary."
+            ),
+            tools=[],
+            model=ctx.model,
+            model_settings=ModelSettings(temperature=0.0),
+            handoffs=[],
+        )
 
-            res = await Runner.run(translator_agent, [{"role": "user", "content": prompt}], max_turns=1)
-
-        except Exception as create_err:
-            # If creating the translator agent fails, try to fall back to any available agent in globals
-            # or fall back to a direct Runner.run attempt.
-            print("translate_to_urdu_batch: translator agent creation failed, attempting fallback...", create_err)
-            agent_var = None
-            for candidate in ("base_agent", "expert", "agronomist_agent", "agent", "expert_agent"):
-                if candidate in globals():
-                    agent_var = globals()[candidate]
-                    break
-
-            if agent_var is not None:
-                res = await Runner.run(agent_var, [{"role": "user", "content": prompt}], max_turns=1)
-            else:
-                # Last-resort attempt: if Runner supports being called with messages only (some runner APIs do),
-                # try that. If it fails, raise a clear error so logs show what to fix.
-                try:
-                    res = await Runner.run([{"role": "user", "content": prompt}], max_turns=1)
-                except Exception as fallback_err:
-                    raise RuntimeError(
-                        "translate_to_urdu_batch error: no available agent for translation. "
-                        "Ensure Agent, ModelSettings, ctx.model and Runner are defined in this module."
-                    ) from fallback_err
-
+        res = await Runner.run(translator_agent, [{"role": "user", "content": prompt}], max_turns=1)
         raw = (getattr(res, "final_output", None) or "").strip()
 
-        # try to extract JSON from response
-        translations: List[str] = []
+        if raw.startswith("```json") and raw.endswith("```"):
+            raw = raw[7:-3].strip()
+        elif raw.startswith("```") and raw.endswith("```"):
+            raw = raw[3:-3].strip()
+
+        # try to parse JSON
         try:
             translations = json.loads(raw)
             if not isinstance(translations, list):
                 raise ValueError("Expected JSON array")
         except Exception:
-            # fallback: split lines — not ideal, but safe
             translations = [line.strip() for line in raw.splitlines() if line.strip()]
 
         # fill results and cache
         for idx, text_index in enumerate(indexes):
             translated = translations[idx] if idx < len(translations) else to_translate[idx]
-            # ensure we have a string
-            if translated is None:
-                translated = to_translate[idx]
             _TRANSLATION_CACHE[to_translate[idx]] = translated
             results[text_index] = translated
-
-        # for any remaining None, keep original
-        for i, r in enumerate(results):
-            if r is None:
-                results[i] = texts[i]
 
         return results  # type: ignore
 
     except Exception as e:
         print("translate_to_urdu_batch error:", e)
-        # fallback: return originals
         return texts
+
 
 
 
