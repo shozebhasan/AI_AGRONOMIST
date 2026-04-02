@@ -1,5 +1,7 @@
 import os
 import ssl
+from sqlalchemy import text
+import json
 from datetime import datetime
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base, relationship
@@ -151,7 +153,18 @@ class ChatImage(Base):
     user = relationship("User", backref="images")
     conversation = relationship("Conversation", backref="images")
 
-
+class MessageFeedback(Base):
+    __tablename__ = "message_feedbacks"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(Integer, ForeignKey("messages.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    feedback_type = Column(String(20), nullable=False)  # 'good', 'bad'
+    comment = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    message = relationship("Message", backref="feedbacks")
+    user = relationship("User", backref="feedbacks")
 
 
 
@@ -250,28 +263,160 @@ async def async_get_history(user_id: int, limit: int = 50):
         return list(reversed(messages))  # Return chronological order
 
 
-# delete chats from sidebar
+# delete chats 
 
 async def async_delete_conversation(conversation_id: int) -> bool:
     """
-    Permanently delete conversation and its messages.
-    Returns True if deleted, False if not found.
+    Delete a conversation and ALL its traces so the agent has zero access.
+    Archives to deleted_chats before deletion.
     """
     async with async_session_maker() as session:
-        # Ensure conversation exists
-        result = await session.execute(select(Conversation).where(Conversation.id == conversation_id))
-        conv = result.scalars().first()
-        if not conv:
+        try:
+            # 1. Fetch conversation
+            conv_result = await session.execute(
+                select(Conversation).where(Conversation.id == conversation_id)
+            )
+            conv = conv_result.scalars().first()
+            if not conv:
+                return False
+
+            user_id = conv.user_id
+
+            # 2. Fetch all messages for archiving
+            msgs_result = await session.execute(
+                select(Message).where(Message.conversation_id == conversation_id)
+                .order_by(Message.timestamp)
+            )
+            msgs = msgs_result.scalars().all()
+
+            # 3. Serialize messages to JSON
+            messages_json = [
+                {
+                    "id": m.id,
+                    "role": m.role,
+                    "content": m.content,
+                    "timestamp": m.timestamp.isoformat() if m.timestamp else None
+                }
+                for m in msgs
+            ]
+
+            # 4. Archive to deleted_chats BEFORE deleting
+            await session.execute(
+                text("""
+                    INSERT INTO deleted_chats 
+                        (original_conversation_id, user_id, title, messages)
+                    VALUES 
+                        (:conv_id, :user_id, :title, :messages)
+                """),
+                {
+                    "conv_id": conversation_id,
+                    "user_id": user_id,
+                    "title": conv.title,
+                    "messages": json.dumps(messages_json)
+                }
+            )
+
+            # 5. Get message IDs for this conversation (needed for cleanup)
+            msg_ids_result = await session.execute(
+                text("SELECT id FROM messages WHERE conversation_id = :cid"),
+                {"cid": conversation_id}
+            )
+            msg_ids = [row[0] for row in msg_ids_result.fetchall()]
+
+            # 6. Delete message feedbacks
+            await session.execute(
+                text("""
+                    DELETE FROM message_feedbacks 
+                    WHERE message_id IN (
+                        SELECT id FROM messages WHERE conversation_id = :cid
+                    )
+                """),
+                {"cid": conversation_id}
+            )
+
+            # 7. Delete chat images
+            await session.execute(
+                text("DELETE FROM chat_images WHERE conversation_id = :cid"),
+                {"cid": conversation_id}
+            )
+
+            # 8. Delete approximations
+            await session.execute(
+                text("DELETE FROM approximations WHERE conversationid = :cid"),
+                {"cid": conversation_id}
+            )
+
+            # 9. Delete messages
+            await session.execute(
+                text("DELETE FROM messages WHERE conversation_id = :cid"),
+                {"cid": conversation_id}
+            )
+
+            # 10. Delete conversation
+            await session.execute(
+                text("DELETE FROM conversations WHERE id = :cid"),
+                {"cid": conversation_id}
+            )
+
+            # Cleaning add_to_memory entries that came from this conversation
+            # We identify them by matching content against the archived messages
+            if messages_json:
+                deleted_contents = [m["content"] for m in messages_json]
+                for content in deleted_contents:
+                    await session.execute(
+                        text("""
+                            DELETE FROM add_to_memory 
+                            WHERE user_id = :uid 
+                            AND content = :content
+                        """),
+                        {"uid": user_id, "content": content}
+                    )
+
+            # Rebuild user memory excluding deleted conversation
+            # Fetch remaining messages from OTHER conversations only
+            remaining_msgs_result = await session.execute(
+                text("""
+                    SELECT m.role, m.content 
+                    FROM messages m
+                    WHERE m.user_id = :uid
+                    ORDER BY m.timestamp DESC
+                    LIMIT 100
+                """),
+                {"uid": user_id}
+            )
+            remaining_msgs = remaining_msgs_result.fetchall()
+
+            if remaining_msgs:
+                # Rebuild memory summary from remaining messages only
+                lines = []
+                for role, content in reversed(remaining_msgs):
+                    prefix = "User" if role == "user" else "Assistant"
+                    lines.append(f"{prefix}: {content[:200]}")
+                new_memory_hint = "\n".join(lines[:20])  # Keep last 20 lines
+            else:
+                new_memory_hint = None  # No remaining conversations
+
+            # Update user.memory to remove deleted chat context
+            await session.execute(
+                text("""
+                    UPDATE users 
+                    SET memory = :memory 
+                    WHERE id = :uid
+                """),
+                {
+                    "uid": user_id,
+                    "memory": new_memory_hint  # NULL if no remaining chats
+                }
+            )
+
+            await session.commit()
+            print(f"✅ Conversation {conversation_id} fully deleted and archived. Memory rebuilt.")
+            return True
+
+        except Exception as e:
+            await session.rollback()
+            print(f"❌ async_delete_conversation error: {e}")
             return False
-
-        await session.execute(delete(ChatImage).where(ChatImage.conversation_id == conversation_id))
-
-        # Delete messages explicitly (safe even if cascade configured)
-        await session.execute(delete(Message).where(Message.conversation_id == conversation_id))
-        # Delete conversation
-        await session.execute(delete(Conversation).where(Conversation.id == conversation_id))
-        await session.commit()
-        return True
 
 
 async def async_get_conversations_for_user(user_id: int) -> List[dict]:
@@ -442,3 +587,165 @@ async def save_chat_image(user_id: int, conversation_id: int, image_data: bytes,
         ))
         await session.commit()
 
+
+
+async def async_save_message_feedback(
+    user_id: int, 
+    message_id: int, 
+    feedback_type: str, 
+    comment: Optional[str] = None
+):
+    """Save or update message feedback"""
+    async with async_session_maker() as session:
+        # Check if feedback exists
+        result = await session.execute(
+            select(MessageFeedback).where(
+                MessageFeedback.message_id == message_id,
+                MessageFeedback.user_id == user_id
+            )
+        )
+        existing = result.scalars().first()
+        
+        if existing:
+            existing.feedback_type = feedback_type
+            existing.comment = comment
+            existing.created_at = datetime.utcnow()
+        else:
+            feedback = MessageFeedback(
+                user_id=user_id,
+                message_id=message_id,
+                feedback_type=feedback_type,
+                comment=comment
+            )
+            session.add(feedback)
+        
+        await session.commit()
+        return True
+
+#delete accounts.
+async def async_delete_account(user_id: int) -> bool:
+    """
+    Permanently delete a user account.
+    Archives everything to deleted_accounts table first.
+    Agent has zero access to deleted_accounts.
+    """
+    async with async_session_maker() as session:
+        try:
+            # 1. Fetch user
+            user_result = await session.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = user_result.scalars().first()
+            if not user:
+                return False
+
+            # 2. Fetch all conversations with their messages
+            convs_result = await session.execute(
+                select(Conversation).where(Conversation.user_id == user_id)
+            )
+            convs = convs_result.scalars().all()
+
+            conversations_json = []
+            for conv in convs:
+                msgs_result = await session.execute(
+                    select(Message).where(Message.conversation_id == conv.id)
+                    .order_by(Message.timestamp)
+                )
+                msgs = msgs_result.scalars().all()
+                conversations_json.append({
+                    "id": conv.id,
+                    "title": conv.title,
+                    "created_at": conv.created_at.isoformat() if conv.created_at else None,
+                    "messages": [
+                        {
+                            "role": m.role,
+                            "content": m.content,
+                            "timestamp": m.timestamp.isoformat() if m.timestamp else None
+                        }
+                        for m in msgs
+                    ]
+                })
+
+            # 3. Fetch user facts
+            facts_result = await session.execute(
+                select(UserFact).where(UserFact.user_id == user_id)
+            )
+            facts = facts_result.scalars().all()
+            facts_json = {f.key: f.value for f in facts}
+
+            # 4. Archive to deleted_accounts
+            await session.execute(
+                text("""
+                    INSERT INTO deleted_accounts
+                        (original_user_id, email, name, hashed_password, conversations, user_facts, memory)
+                    VALUES
+                        (:uid, :email, :name, :hashed_password, :conversations, :user_facts, :memory)
+                """),
+                {
+                    "uid": user_id,
+                    "email": user.email,
+                    "name": user.name,
+                    "hashed_password": getattr(user, "hashed_password", None),
+                    "conversations": json.dumps(conversations_json),
+                    "user_facts": json.dumps(facts_json),
+                    "memory": getattr(user, "memory", None),
+                }
+            )
+
+            # 5. Delete all user data in order (foreign keys)
+            await session.execute(
+                text("""
+                    DELETE FROM message_feedbacks WHERE user_id = :uid
+                """), {"uid": user_id}
+            )
+            await session.execute(
+                text("""
+                    DELETE FROM message_feedbacks WHERE message_id IN (
+                        SELECT id FROM messages WHERE user_id = :uid
+                    )
+                """), {"uid": user_id}
+            )
+            await session.execute(
+                text("DELETE FROM chat_images WHERE user_id = :uid"),
+                {"uid": user_id}
+            )
+            await session.execute(
+                text("""
+                    DELETE FROM approximations WHERE conversationid IN (
+                        SELECT id FROM conversations WHERE user_id = :uid
+                    )
+                """), {"uid": user_id}
+            )
+            await session.execute(
+                text("DELETE FROM add_to_memory WHERE user_id = :uid"),
+                {"uid": user_id}
+            )
+            await session.execute(
+                text("DELETE FROM user_facts WHERE user_id = :uid"),
+                {"uid": user_id}
+            )
+            await session.execute(
+                text("DELETE FROM password_reset_tokens WHERE email = :email"),
+                {"email": user.email}
+            )
+            await session.execute(
+                text("DELETE FROM messages WHERE user_id = :uid"),
+                {"uid": user_id}
+            )
+            await session.execute(
+                text("DELETE FROM conversations WHERE user_id = :uid"),
+                {"uid": user_id}
+            )
+            await session.execute(
+                text("DELETE FROM users WHERE id = :uid"),
+                {"uid": user_id}
+            )
+
+            await session.commit()
+            print(f"✅ User {user_id} ({user.email}) account deleted and archived")
+            return True
+
+        except Exception as e:
+            await session.rollback()
+            print(f"❌ async_delete_account error: {e}")
+            return False
