@@ -1,4 +1,3 @@
-
 import os
 import json
 import asyncio
@@ -8,26 +7,6 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from guards import check_for_abuse, handle_abuse_response
-
-_context_cache = {}
-
-from db import (
-    init_db,
-    async_save_message,
-    async_get_history,
-    async_get_or_create_user,
-    async_get_messages_for_conversation,  
-)
-
-load_dotenv()  # load .env file
-project_id = os.getenv("GEE_PROJECT_ID")
-if project_id:
-    try:
-        ee.Initialize(project=project_id)
-    except Exception as _:
-        # Earth Engine init can fail in local dev without creds; do not crash
-        pass
-
 from tavily import TavilyClient
 from agents import (
     Agent,
@@ -43,6 +22,43 @@ from agents import (
     handoff
 )
 from agents.extensions.handoff_filters import remove_all_tools
+
+_context_cache = {}
+
+from db import (
+    init_db,
+    async_save_message,
+    async_get_history,
+    async_get_or_create_user,
+    async_get_messages_for_conversation,  
+)
+
+load_dotenv() 
+project_id = os.getenv("GEE_PROJECT_ID")
+if project_id:
+    try:
+        ee.Initialize(project=project_id)
+        print(f"✅ Google Earth Engine initialized with project: {project_id}")
+    except Exception as e:
+        print(f"❌ GEE initialization failed: {e}")
+else:
+    print("⚠️ GEE_PROJECT_ID not set — NDVI crop monitoring will not work")
+
+#free translate to urdu for rag
+def translate_to_urdu_free(text: str) -> str:
+    """Translate text to Urdu using Google Translate (free, no API key needed)"""
+    try:
+        from deep_translator import GoogleTranslator
+        # Split into chunks of 4500 chars (Google limit is 5000)
+        chunks = [text[i:i+4500] for i in range(0, len(text), 4500)]
+        translated_chunks = []
+        for chunk in chunks:
+            translated = GoogleTranslator(source='auto', target='ur').translate(chunk)
+            translated_chunks.append(translated)
+        return "\n".join(translated_chunks)
+    except Exception as e:
+        print(f"⚠️ Free translation failed: {e} — returning original")
+        return text
 
 
 # Model and external clients
@@ -69,7 +85,6 @@ class Context:
         )
 
 ctx = Context()
-
 
 # Tools
 
@@ -121,83 +136,14 @@ class AnalysisCounter(FunctionTool):
             on_invoke_tool=self.on_invoke_tool
         )
 
-    async def on_invoke_tool(self) -> str:
+    async def on_invoke_tool(self, tool_context, arguments) -> str:
         self._count += 1
         return f"📈 Total analyses performed in this session: {self._count}"
 
 counter_tool = AnalysisCounter()
 
 
-# Memory building (global, DB-backed)
-
-async def build_global_user_memory(user_id: int, max_messages: int = 200) -> str:
-    """Build comprehensive user memory from all conversations"""
-    history = await async_get_history(user_id, limit=max_messages)
-    
-    if not history or len(history) < 3:
-        return "New user, no prior conversation history."
-    
-    # Build chronological conversation text
-    lines = []
-    for msg in reversed(history):
-        role = "User" if msg.role == "user" else "Assistant"
-        content = msg.content[:300]  # Limit to 300 chars per message
-        lines.append(f"{role}: {content}")
-    
-    memory_source = "\n".join(lines)
-    
-    
-    # Build structured extraction prompt
-    memory_extraction_prompt = f"""You are extracting key user information from chat history.
-
-IMPORTANT: Only extract facts the USER explicitly stated. Do not make assumptions.
-
-Look for:
-- User's name (if they said "my name is..." or "I am...")
-- Location/region/country they mentioned
-- Crops they grow or asked about (wheat, rice, tomatoes, etc.)
-- Problems they've had (pests, diseases, soil issues)
-- Farming preferences (organic, irrigation methods)
-
-Conversation history:
-{memory_source[:6000]}
-
-Format your response EXACTLY like this example:
-- Name: [name if mentioned, otherwise "Not provided"]
-- Location: [location if mentioned, otherwise "Not provided"]  
-- Crops: [list crops mentioned]
-- Past Issues: [problems they discussed]
-- Preferences: [any farming preferences mentioned]
-
-Your extraction:"""
-    
-    temp_agent = Agent(
-        name="MemoryExtractor",
-        instructions="Extract user facts from conversation history. Be specific and accurate.",
-        tools=[],
-        model=ctx.model,
-        model_settings=ModelSettings(temperature=0.1),
-    )
-    
-    result = await Runner.run(temp_agent, memory_extraction_prompt, max_turns=1)
-    memory_text = result.final_output.strip()
-    
-    
-    # Persist to database
-    try:
-        from db import async_session_maker, User
-        async with async_session_maker() as session:
-            user_obj = await session.get(User, user_id)
-            if user_obj:
-                user_obj.memory = memory_text
-                await session.commit()
-                print(f"✅ Saved memory for user {user_id}: {memory_text[:100]}")
-    except Exception as e:
-        print(f"⚠️ Failed to persist memory: {e}")
-    
-    return memory_text
-
-
+# conversation context
 async def get_conversation_context(conversation_id: int, max_messages: int = 20) -> str:
     """Get recent conversation context with caching for performance"""
     if not conversation_id:
@@ -257,7 +203,7 @@ escalation_agent = Agent(
     - Always suggest a quick and practical immediate solution first.
     - Then, ask the user: "Would you like to escalate this to a professional agronomist for detailed support?"
     - If the user says YES → provide the following contact:
-        Agronomist: Aleema Saleem
+        Agronomist: Shozeb Hasan
         Phone: +92 123456789
     - If the user says NO → continue giving advice yourself.
     """
@@ -290,12 +236,15 @@ RECENT CONVERSATION (refer to this for context):
 
 {language_instructions}
 
+
+
 Your responsibilities:
 - Reference past conversations naturally (e.g., "As we discussed before...")
 - Remember user's crops, location, and farming methods
 - Use agri_search for research
 - Use crop_monitoring for NDVI analysis
 - Be conversational and remember what the user has told you
+- Talk to the user in roman urdu whenever the user speak's with you in roman urdu
 
 
 
@@ -331,6 +280,7 @@ crop_agent = Agent(
     - If NDVI or other data is available, analyze it and give insights on crop health, stress, and growth stage.
     - Explain what additional info is required if data is insufficient.
     - Give context-aware guidance for yield, irrigation, fertilizer.
+    - Give your answer in roman urdu whenever user uses roman urdu.
     """,
     tools=[agri_search, crop_monitoring, counter_tool],
     model=ctx.model,
@@ -392,37 +342,42 @@ async def run_agronomy_team(
     
     # Load persisted memory (fast - just database read)
     try:
-        from db import async_session_maker, User
-        async with async_session_maker() as session:
-            user_obj = await session.get(User, user_id)
-            persisted_memory = getattr(user_obj, "memory", None) if user_obj else None
-
-            
-            print(f"📝 DEBUG: Loaded memory from DB: {persisted_memory[:100] if persisted_memory else 'NONE'}")
+        from db import get_user_facts
+        user_facts = await get_user_facts(user_id)
+        if user_facts:
+            facts_lines = "\n".join(f"- {k}: {v}" for k, v in user_facts.items())
+            global_memory = f"Known user facts:\n{facts_lines}"
+        else:
+            global_memory = ""
+        print(f"📝 Using user_facts only: {global_memory[:100] if global_memory else 'NONE'}")
     except Exception as e:
-        print(f"⚠️ Could not read persisted memory: {e}")
-        persisted_memory = None
-    
-    # Use cached memory or trigger async build
-    if not persisted_memory or len(persisted_memory) < 50:
-        # Build in background, don't block the response
-        asyncio.create_task(build_global_user_memory(user_id, max_messages=200))
-        global_memory = persisted_memory or ""  # Use what we have, even if empty
-    else:
-        global_memory = persisted_memory
-        # Refresh memory periodically in background
-        recent_history = await async_get_history(user_id, limit=10)
-        if len(recent_history) >= 10:
-            asyncio.create_task(build_global_user_memory(user_id, max_messages=200))
-
-    print(f"🧠 DEBUG: Using global memory: {global_memory[:200]}")
+        print(f"⚠️ Could not read user facts: {e}")
+        global_memory = ""
     
     # Get conversation-specific context (with caching)
     conversation_context = ""
     if conversation_id:
         conversation_context = await get_conversation_context(conversation_id, max_messages=15)
-        print(f"🔍 DEBUG: Loaded conversation context ({len(conversation_context)} chars)")
-        print(f"🔍 DEBUG: Global memory preview: {global_memory[:300] if global_memory else 'EMPTY'}")
+
+
+    creator_keywords = [
+        "who made you", "who created you", "who built you", "who developed you",
+        "who made this", "who created this", "who built this", "who developed this",
+        "who is your developer", "who is your creator", "who is behind this",
+        "tumhe kisne banaya", "kisne banaya", "developer kaun hai", "aapko kisne banaya"
+    ]
+    if any(kw in question.lower() for kw in creator_keywords):
+        creator_response = """The AI Agronomist was designed and developed by **NCAI -NEDUET, Smart City Lab**.
+
+👨‍💻 **Developer's:** Shozeb Hasan and Aleema Saleem
+🔗 **LinkedIn:** https://www.linkedin.com/in/shozebhasan/
+🐙 **GitHub:** https://github.com/shozebhasan
+
+🔗 **LinkedIn:** https://github.com/AleemaSaleem
+🐙 **GitHub:** https://www.linkedin.com/in/aleema-saleem-217a3217b/
+
+Feel free to connect or explore more of his work!"""
+        return creator_response
 
     # Build vision context string if available
     vision_context = ""
@@ -462,7 +417,7 @@ async def run_agronomy_team(
         )
     # Create personalized base agent
     base_agent = create_base_agent(user_email, global_memory, conversation_context, vision_context, language_instructions)
-    print(f"🔍 DEBUG: Agent instructions length: {len(base_agent.instructions) if isinstance(base_agent.instructions, str) else 'DYNAMIC'}")
+    #print(f"🔍 DEBUG: Agent instructions length: {len(base_agent.instructions) if isinstance(base_agent.instructions, str) else 'DYNAMIC'}")
     
     # Prepare question with image context
     if images and len(images) > 0:
@@ -494,6 +449,30 @@ async def run_agronomy_team(
             })
 
     messages = [user_message]
+
+        # RAG: check knowledge base first before using Gemini
+    _is_vision = vision_data is not None or "[VISION ANALYSIS]" in question
+    if _is_vision:
+        print(f"🔬 Vision request — skipping RAG, routing to Gemini")
+    try:
+        from rag import query_rag
+        rag_result = query_rag(question) if not _is_vision else {"found": False, "context": "", "sources": [], "best_score": 0.0}
+        if not _is_vision:
+            print(f"📚 RAG {'✅ HIT' if rag_result['found'] else '❌ MISS'} | score: {rag_result['best_score']} | query: {question[:60]}")
+
+        if rag_result["found"]:
+            # Zero Gemini calls — return PDF content directly
+            response_text = rag_result["context"] 
+            print(f"✅ Returning RAG answer directly (0 Gemini calls used)")
+
+            # agr urdu mode on hai tou lang = urdu
+            if language and language.startswith("ur"):
+                print("translating to urdu using free urdu translation service")
+                response_text = translate_to_urdu_free(response_text)
+            return response_text
+
+    except Exception as rag_e:
+        print(f"⚠️ RAG error (falling back to Gemini): {rag_e}")
     
     # Fast escalation check (keyword-based, no routing needed)
     urgent_keywords = ["urgent", "emergency", "dying", "rotting", "serious condition", "crisis", "problem", "help immediately"]
@@ -518,7 +497,7 @@ async def run_agronomy_team(
              print(f"❌ Escalation error: {e}")
              response = "I understand this is urgent. Here's immediate advice:\n\n1. Assess the situation quickly\n2. Take photos if possible\n3. Check for visible pests or diseases\n4. Ensure proper irrigation"
 
-        return f"{response}\n\n📞 Professional Agronomist Contact:\n• Name: Aleema Saleem\n• Phone: +92 3378288720\n• WhatsApp: wa.me/923378288720\n• Availability: For urgent agricultural assistance"
+        return f"{response}\n\n📞 Professional Agronomist Contact:\n• Name: Shozeb Hasan\n• Phone: +92 3162525612\n• WhatsApp: wa.me/923162525612\n• Availability: For urgent agricultural assistance"
     # Simplified routing - one LLM call
     router_prompt = f"""Analyze this question and respond with ONE word only: Soil, Crop, Economics, or General.
 
@@ -550,16 +529,6 @@ Your response (one word only):"""
         response_text = translations[0]
 
     return response_text
-
-    
-
-
-
-    
-
-
-
-
 
 # translation
 _TRANSLATION_CACHE: Dict[str, str] = {}
@@ -636,9 +605,6 @@ async def translate_to_urdu_batch(texts: List[str]) -> List[str]:
     except Exception as e:
         print("translate_to_urdu_batch error:", e)
         return texts
-
-
-
 
 
 # API-facing processing
